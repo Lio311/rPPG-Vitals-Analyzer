@@ -1,6 +1,6 @@
 import streamlit as st
 import cv2
-import numpy as np
+import numpy as np  # Make sure numpy is imported
 import pandas as pd
 import plotly.graph_objects as go
 from scipy.signal import butter, filtfilt, find_peaks
@@ -60,18 +60,21 @@ def extract_signal_from_video(video_path):
 
     fps = cap.get(cv2.CAP_PROP_FPS)
 
-    # --- START OF FIX ---
-    # Validate the FPS. It must be high enough to satisfy Nyquist theorem for our filter.
-    # Our max freq is 3.0 Hz (PPG_MAX_HZ), so FPS must be > 6.0.
-    MIN_FPS_REQUIRED = PPG_MAX_HZ * 2 + 1  # Add 1 for safety margin, e.g., 7.0 Hz
+    # --- START OF FIX (V2) ---
+    # Validate the FPS. It must be high enough to satisfy Nyquist theorem and must be a valid number.
+    MIN_FPS_REQUIRED = PPG_MAX_HZ * 2 + 1  # e.g., 7.0 Hz
     
-    if fps < MIN_FPS_REQUIRED:
-        st.error(f"Video FPS is too low ({fps:.2f} FPS). "
-                 f"A minimum of {MIN_FPS_REQUIRED:.1f} FPS is required for this analysis. "
-                 "Please use a different video file (e.g., 30 FPS).")
+    # Check for NaN (Not a Number) or if FPS is too low
+    if np.isnan(fps) or fps < MIN_FPS_REQUIRED:
+        if np.isnan(fps):
+            st.error("Video file seems corrupted or metadata is missing: Could not read FPS.")
+        else:
+            st.error(f"Video FPS is too low ({fps:.2f} FPS). "
+                     f"A minimum of {MIN_FPS_REQUIRED:.1f} FPS is required for this analysis. "
+                     "Please use a different video file (e.g., 30 FPS).")
         cap.release()
         return None, 0
-    # --- END OF FIX ---
+    # --- END OF FIX (V2) ---
 
     raw_signal = []
     timestamps = []
@@ -93,7 +96,6 @@ def extract_signal_from_video(video_path):
             x, y, w, h = faces[0]
             
             # Define Region of Interest (ROI) - The forehead
-            # Approx. top 10-25% of the face, and middle 50% width
             forehead_y_start = y + int(h * 0.1)
             forehead_y_end = y + int(h * 0.25)
             forehead_x_start = x + int(w * 0.25)
@@ -227,7 +229,7 @@ if uploaded_file is not None:
                 hr_bpm, xf, yf_power = analyze_frequency_domain(filtered_signal_series, fs)
                 
                 # Time analysis
-                rmssd_ms, peaks = analyze_time_domain(filtered_signal_series, fps)
+                rmssd_ms, peaks = analyze_time_domain(filtered_signal_series, fs)
             st.success("Step 3: Analysis complete!")
 
             
