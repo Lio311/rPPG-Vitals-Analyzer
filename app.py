@@ -1,6 +1,6 @@
 import streamlit as st
 import cv2
-import numpy as np  # Make sure numpy is imported
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from scipy.signal import butter, filtfilt, find_peaks
@@ -61,21 +61,20 @@ def extract_signal_from_video(video_path):
 
     fps = cap.get(cv2.CAP_PROP_FPS)
 
-    # --- PRIMARY FIX (V2) ---
-    # Validate the FPS. It must be high enough to satisfy Nyquist theorem and must be a valid number.
+    # --- START OF FINAL FIX (V3) ---
+    # Ultra-robust check for invalid FPS values (None, NaN, 0, inf, or too low)
     MIN_FPS_REQUIRED = PPG_MAX_HZ * 2 + 1  # e.g., 7.0 Hz
     
-    # Check for NaN (Not a Number) or if FPS is too low
-    if np.isnan(fps) or fps < MIN_FPS_REQUIRED:
-        if np.isnan(fps):
-            st.error("Video file seems corrupted or metadata is missing: Could not read FPS.")
-        else:
-            st.error(f"Video FPS is too low ({fps:.2f} FPS). "
-                     f"A minimum of {MIN_FPS_REQUIRED:.1f} FPS is required for this analysis. "
-                     "Please use a different video file (e.g., 30 FPS).")
+    is_valid_fps = isinstance(fps, (int, float)) and not np.isnan(fps) and np.isfinite(fps) and fps >= MIN_FPS_REQUIRED
+    
+    if not is_valid_fps:
+        st.error(f"Video file has an invalid FPS value ({fps}). "
+                 f"It might be corrupted or metadata is missing. "
+                 f"A minimum of {MIN_FPS_REQUIRED:.1f} FPS is required. "
+                 "Please use a different video file.")
         cap.release()
         return None, 0
-    # --- END OF PRIMARY FIX ---
+    # --- END OF FINAL FIX (V3) ---
 
     raw_signal = []
     timestamps = []
@@ -118,24 +117,13 @@ def process_signal(signal_series, fs):
     """
     Cleans, detrends, and bandpass filters the raw signal.
     """
-    # --- START OF NEW SAFEGUARDS ---
-    
-    # 1. Paranoid check for FPS (catches error if first check failed)
-    MIN_FS_FOR_BUTTER = PPG_MAX_HZ * 2
-    if fs <= MIN_FS_FOR_BUTTER:
-        st.error(f"Signal processing error: FPS ({fs}) is too low for filter design.")
-        return None # Return None to stop processing
-
-    # 2. Check for signal length (for filtfilt)
-    # filtfilt requires signal length > 3 * filter_order
+    # Check for signal length (for filtfilt)
     MIN_SIGNAL_LEN = 3 * FILTER_ORDER + 1
     if len(signal_series) < MIN_SIGNAL_LEN:
         st.warning(f"Video is too short ({len(signal_series)} samples). "
                    f"Need at least {MIN_SIGNAL_LEN} samples for processing. "
                    "Please use a longer video.")
         return None # Return None to stop processing
-        
-    # --- END OF NEW SAFEGUARDS ---
 
     # 1. Handle missing values
     signal = signal_series.interpolate(method='linear').fillna(method='bfill').fillna(method='ffill')
@@ -144,6 +132,7 @@ def process_signal(signal_series, fs):
     signal_detrended = signal - np.mean(signal)
     
     # 3. Design Butterworth Bandpass filter
+    # This block is now safe because 'fs' was validated in extract_signal_from_video
     nyq = 0.5 * fs
     low = PPG_MIN_HZ / nyq
     high = PPG_MAX_HZ / nyq
@@ -222,7 +211,6 @@ if uploaded_file is not None:
             with st.spinner("Processing and filtering signal..."):
                 filtered_signal_series = process_signal(raw_signal_series, fps)
             
-            # --- NEW CHECK FOR PROCESSING FAILURE ---
             if filtered_signal_series is None:
                 # Error messages are already shown by process_signal
                 st.stop() # Stop execution
