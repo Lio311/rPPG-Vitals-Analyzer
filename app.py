@@ -8,15 +8,15 @@ from scipy.fft import fft, fftfreq
 import tempfile
 import os
 
-# --- קבועים ---
+# --- Constants ---
 HAAR_CASCADE_PATH = "haarcascade_frontalface_default.xml"
 PPG_MIN_HZ = 0.7  # 42 BPM
 PPG_MAX_HZ = 3.0  # 180 BPM
 
-# --- פונקציות עזר ל-Plotly ---
+# --- Plotly Helper Functions ---
 
 def plot_signal(signal_series, title, yaxis_title="Amplitude"):
-    """ יצירת גרף אינטראקטיבי של אות באמצעות Plotly """
+    """Creates an interactive signal plot using Plotly."""
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=signal_series.index, y=signal_series.values, mode='lines', name='Signal'))
     fig.update_layout(
@@ -28,7 +28,7 @@ def plot_signal(signal_series, title, yaxis_title="Amplitude"):
     return fig
 
 def plot_fft(xf, yf, title):
-    """ יצירת גרף ספקטרום (FFT) באמצעות Plotly """
+    """Creates a spectrum (FFT) plot using Plotly."""
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=xf, y=yf, mode='lines', name='PSD'))
     fig.update_layout(
@@ -39,23 +39,23 @@ def plot_fft(xf, yf, title):
     )
     return fig
 
-# --- פונקציות ליבה לעיבוד ---
+# --- Core Processing Functions ---
 
 @st.cache_data
 def extract_signal_from_video(video_path):
     """
-    טוען וידאו, מזהה פנים, מחלץ אות PPG גולמי (ערוץ ירוק) מאזור המצח.
-    מחזיר סדרת Pandas עם אינדקס זמנים.
+    Loads video, detects faces, extracts raw PPG signal (green channel) from forehead.
+    Returns a Pandas Series with a time index.
     """
     if not os.path.exists(HAAR_CASCADE_PATH):
-        st.error(f"שגיאה: הקובץ {HAAR_CASCADE_PATH} לא נמצא. אנא הורד אותו.")
+        st.error(f"Error: {HAAR_CASCADE_PATH} not found. Please download it and place it in the same directory.")
         return None, 0
 
     face_cascade = cv2.CascadeClassifier(HAAR_CASCADE_PATH)
     cap = cv2.VideoCapture(video_path)
     
     if not cap.isOpened():
-        st.error("שגיאה בפתיחת קובץ הוידאו.")
+        st.error("Error opening video file.")
         return None, 0
 
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -67,7 +67,7 @@ def extract_signal_from_video(video_path):
         if not ret:
             break
         
-        # המרת פריים לגווני אפור (יעיל יותר לזיהוי פנים)
+        # Convert frame to grayscale (more efficient for face detection)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
@@ -75,11 +75,11 @@ def extract_signal_from_video(video_path):
         current_time_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
         
         if len(faces) > 0:
-            # שימוש בפנים הראשונות שזוהו
+            # Use the first detected face
             x, y, w, h = faces[0]
             
-            # הגדרת אזור עניין (ROI) - המצח
-            # בערך 20% עליונים של הפנים, ו-50% אמצעיים ברוחב
+            # Define Region of Interest (ROI) - The forehead
+            # Approx. top 10-25% of the face, and middle 50% width
             forehead_y_start = y + int(h * 0.1)
             forehead_y_end = y + int(h * 0.25)
             forehead_x_start = x + int(w * 0.25)
@@ -88,7 +88,7 @@ def extract_signal_from_video(video_path):
             roi = frame[forehead_y_start:forehead_y_end, forehead_x_start:forehead_x_end]
             
             if roi.size > 0:
-                # חילוץ ערוץ ירוק (אינדקס 1 ב-BGR) וחישוב ממוצע
+                # Extract green channel (index 1 in BGR) and average it
                 green_channel_mean = np.mean(roi[:, :, 1])
                 raw_signal.append(green_channel_mean)
                 timestamps.append(current_time_sec)
@@ -96,33 +96,33 @@ def extract_signal_from_video(video_path):
     cap.release()
     
     if not raw_signal:
-        st.warning("לא זוהו פנים בוידאו.")
+        st.warning("No faces were detected in the video.")
         return None, 0
 
-    # יצירת סדרת Pandas עם אינדקס זמנים
+    # Create a Pandas Series with a time index
     signal_series = pd.Series(raw_signal, index=pd.to_timedelta(timestamps, unit='s'))
     return signal_series, fps
 
 
 def process_signal(signal_series, fs):
     """
-    מנקה, מבצע Detrend, ומסנן (Bandpass) את האות הגולמי.
+    Cleans, detrends, and bandpass filters the raw signal.
     """
-    # 1. טיפול בערכים חסרים (אם היו פריימים בלי פנים)
-    # אינטרפולציה לינארית ומילוי קצוות
+    # 1. Handle missing values (if any frames had no face)
+    # Linear interpolation and fill ends
     signal = signal_series.interpolate(method='linear').fillna(method='bfill').fillna(method='ffill')
     
-    # 2. הסרת מגמה (Detrending) - הסרת שינויים איטיים
-    # שימוש בהסרת ממוצע פשוטה
+    # 2. Detrending - Remove slow-moving changes
+    # Simple mean subtraction
     signal_detrended = signal - np.mean(signal)
     
-    # 3. עיצוב מסנן Butterworth Bandpass
+    # 3. Design Butterworth Bandpass filter
     nyq = 0.5 * fs
     low = PPG_MIN_HZ / nyq
     high = PPG_MAX_HZ / nyq
     b, a = butter(order=4, Wn=[low, high], btype='band')
     
-    # 4. החלת המסנן (filtfilt למניעת הזזת פאזה)
+    # 4. Apply filter (filtfilt for zero phase shift)
     filtered_signal = filtfilt(b, a, signal_detrended)
     
     return pd.Series(filtered_signal, index=signal_series.index)
@@ -130,19 +130,19 @@ def process_signal(signal_series, fs):
 
 def analyze_frequency_domain(signal_series, fs):
     """
-    מבצע ניתוח FFT ומחשב קצב לב (HR).
+    Performs FFT analysis and calculates Heart Rate (HR).
     """
     N = len(signal_series)
     if N == 0:
         return 0, np.array([]), np.array([])
 
-    # חישוב FFT
+    # Calculate FFT
     yf = fft(signal_series.values)
     yf_power = np.abs(yf[:N // 2])**2  # Power Spectral Density
     
     xf = fftfreq(N, 1 / fs)[:N // 2]
     
-    # סינון תדרים לתחום הפיזיולוגי הרלוונטי
+    # Filter frequencies to the relevant physiological range
     valid_indices = (xf >= PPG_MIN_HZ) & (xf <= PPG_MAX_HZ)
     xf_valid = xf[valid_indices]
     yf_valid = yf_power[valid_indices]
@@ -150,7 +150,7 @@ def analyze_frequency_domain(signal_series, fs):
     if len(yf_valid) == 0:
         return 0, xf, yf_power
 
-    # מציאת התדר הדומיננטי (השיא) בתחום
+    # Find the dominant frequency (peak) in the range
     peak_index = np.argmax(yf_valid)
     hr_frequency = xf_valid[peak_index]
     
@@ -161,100 +161,100 @@ def analyze_frequency_domain(signal_series, fs):
 
 def analyze_time_domain(signal_series, fs):
     """
-    מבצע ניתוח במרחב הזמן (איתור פיקים) ומחשב HRV (RMSSD).
+    Performs time-domain analysis (peak detection) and calculates HRV (RMSSD).
     """
     signal = signal_series.values
     
-    # איתור פיקים (פעימות לב)
-    # נדרש כוונון של 'prominence' ו-'distance'
-    distance_min = int(fs * (60.0 / 180.0)) # מרחק מינימלי בין פעימות (לפי 180 BPM)
+    # Find peaks (heartbeats)
+    # 'prominence' and 'distance' may need tuning
+    distance_min = int(fs * (60.0 / 180.0)) # Min distance between beats (based on 180 BPM)
     
     peaks, _ = find_peaks(signal, prominence=np.std(signal)*0.2, distance=distance_min)
     
     if len(peaks) < 3:
-        return 0, peaks  # לא מספיק פעימות לחישוב HRV
+        return 0, peaks  # Not enough beats to calculate HRV
 
-    # חישוב מרווחי IBI (Inter-Beat Intervals) בשניות
+    # Calculate IBI (Inter-Beat Intervals) in seconds
     ibi_sec = np.diff(peaks) / fs
     
-    # חישוב RMSSD (Root Mean Square of Successive Differences)
+    # Calculate RMSSD (Root Mean Square of Successive Differences)
     diff_ibi_sec = np.diff(ibi_sec)
-    rmssd_ms = np.sqrt(np.mean(diff_ibi_sec**2)) * 1000  # המרה למילישניות
+    rmssd_ms = np.sqrt(np.mean(diff_ibi_sec**2)) * 1000  # Convert to milliseconds
     
     return rmssd_ms, peaks
 
-# --- ממשק Streamlit ---
+# --- Streamlit UI ---
 
-st.set_page_config(layout="wide", page_title="rPPG - מנתח דופק מוידאו")
-st.title("🔬 מנתח אותות פוטופלטיסמוגרפיה (rPPG) מבוסס וידאו")
-st.markdown(f"**הערה:** ודא שהקובץ `{HAAR_CASCADE_PATH}` נמצא בתיקייה.")
+st.set_page_config(layout="wide", page_title="rPPG Vitals Analyzer")
+st.title("rPPG - Video-Based Vitals Analyzer")
+st.markdown("**Important:** For best results, film your face while holding **perfectly still**. Do not move at all.")
 
-uploaded_file = st.file_uploader("העלה קובץ וידאו (מומלץ וידאו קצר, 15-30 שניות, עם פנים מוארות היטב)", type=["mp4", "mov", "avi"])
+uploaded_file = st.file_uploader("Upload a video file (Recommended: 15-30 seconds, face well-lit)", type=["mp4", "mov", "avi"])
 
 if uploaded_file is not None:
-    # שמירת הקובץ שהועלה לקובץ זמני כדי ש-OpenCV יוכל לקרוא אותו
+    # Save uploaded file to a temporary file so OpenCV can read it
     with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tfile:
         tfile.write(uploaded_file.getvalue())
         video_path = tfile.name
 
     try:
-        with st.spinner("מעבד וידאו... זה עשוי לקחת דקה..."):
+        with st.spinner("Processing video... this may take a moment..."):
             raw_signal_series, fps = extract_signal_from_video(video_path)
         
         if raw_signal_series is not None and not raw_signal_series.empty:
-            st.success("שלב 1: חילוץ האות הגולמי הסתיים!")
+            st.success("Step 1: Raw signal extraction complete!")
             
-            with st.spinner("מעבד ומסנן אות..."):
+            with st.spinner("Processing and filtering signal..."):
                 filtered_signal_series = process_signal(raw_signal_series, fps)
-            st.success("שלב 2: סינון ועיבוד האות הסתיימו!")
+            st.success("Step 2: Signal filtering and processing complete!")
 
-            with st.spinner("מבצע ניתוח תדר וזמן..."):
-                # ניתוח תדר
+            with st.spinner("Performing frequency and time domain analysis..."):
+                # Frequency analysis
                 hr_bpm, xf, yf_power = analyze_frequency_domain(filtered_signal_series, fps)
                 
-                # ניתוח זמן
+                # Time analysis
                 rmssd_ms, peaks = analyze_time_domain(filtered_signal_series, fps)
-            st.success("שלב 3: הניתוח הסתיים!")
+            st.success("Step 3: Analysis complete!")
 
             
-            # --- הצגת התוצאות ---
-            st.header("📈 תוצאות ומדדים")
+            # --- Display Results ---
+            st.header("Results & Metrics")
             
             col1, col2 = st.columns(2)
-            col1.metric("❤️ קצב לב (HR) - מבוסס FFT", f"{hr_bpm:.1f} BPM")
-            col2.metric("⏱️ שונות קצב לב (RMSSD)", f"{rmssd_ms:.2f} ms")
+            col1.metric("Heart Rate (HR) - FFT Based", f"{hr_bpm:.1f} BPM")
+            col2.metric("Heart Rate Variability (RMSSD)", f"{rmssd_ms:.2f} ms")
 
-            # --- הצגת הגרפים ---
-            st.header("📊 ניתוח גרפי")
-            tab1, tab2, tab3 = st.tabs(["אות גולמי", "אות מסונן ופיקים", "ניתוח תדר (FFT)"])
+            # --- Display Plots ---
+            st.header("Graphical Analysis")
+            tab1, tab2, tab3 = st.tabs(["Raw Signal", "Filtered Signal & Peaks", "Frequency Analysis (FFT)"])
 
             with tab1:
-                st.subheader("אות PPG גולמי (מהערוץ הירוק)")
-                st.plotly_chart(plot_signal(raw_signal_series, "אות גולמי"), use_container_width=True)
+                st.subheader("Raw PPG Signal (from Green Channel)")
+                st.plotly_chart(plot_signal(raw_signal_series, "Raw Signal"), use_container_width=True)
 
             with tab2:
-                st.subheader("אות PPG מסונן (Bandpass) עם זיהוי פעימות")
-                fig_filtered = plot_signal(filtered_signal_series, "אות מסונן", yaxis_title="Normalized Amplitude")
-                # הוספת הפיקים כנקודות על הגרף
+                st.subheader("Filtered PPG Signal (Bandpass) with Peak Detection")
+                fig_filtered = plot_signal(filtered_signal_series, "Filtered Signal", yaxis_title="Normalized Amplitude")
+                # Add peaks as markers on the plot
                 fig_filtered.add_trace(go.Scatter(
                     x=filtered_signal_series.index[peaks],
                     y=filtered_signal_series.values[peaks],
                     mode='markers',
                     marker=dict(color='red', size=8, symbol='x'),
-                    name='Peaks (פעימות)'
+                    name='Peaks (Heartbeats)'
                 ))
                 st.plotly_chart(fig_filtered, use_container_width=True)
 
             with tab3:
-                st.subheader("ספקטרום הספק (FFT) של האות המסונן")
+                st.subheader("Power Spectrum (FFT) of Filtered Signal")
                 fig_fft = plot_fft(xf, yf_power, "Power Spectral Density (PSD)")
-                # הוספת קו המציין את הדופק שנמצא
+                # Add a vertical line/rectangle indicating the found HR
                 fig_fft.add_vrect(x0=hr_bpm/60 - 0.1, x1=hr_bpm/60 + 0.1, 
                                   fillcolor="green", opacity=0.25, line_width=0,
                                   annotation_text=f"HR: {hr_bpm:.1f} BPM", annotation_position="top left")
                 st.plotly_chart(fig_fft, use_container_width=True)
 
     finally:
-        # ניקוי הקובץ הזמני
+        # Clean up the temporary file
         if 'video_path' in locals() and os.path.exists(video_path):
             os.remove(video_path)
