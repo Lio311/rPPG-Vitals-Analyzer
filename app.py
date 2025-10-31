@@ -12,6 +12,7 @@ import os
 HAAR_CASCADE_PATH = "haarcascade_frontalface_default.xml"
 PPG_MIN_HZ = 0.7  # 42 BPM
 PPG_MAX_HZ = 3.0  # 180 BPM
+FILTER_ORDER = 4
 
 # --- Plotly Helper Functions ---
 
@@ -60,7 +61,7 @@ def extract_signal_from_video(video_path):
 
     fps = cap.get(cv2.CAP_PROP_FPS)
 
-    # --- START OF FIX (V2) ---
+    # --- PRIMARY FIX (V2) ---
     # Validate the FPS. It must be high enough to satisfy Nyquist theorem and must be a valid number.
     MIN_FPS_REQUIRED = PPG_MAX_HZ * 2 + 1  # e.g., 7.0 Hz
     
@@ -74,7 +75,7 @@ def extract_signal_from_video(video_path):
                      "Please use a different video file (e.g., 30 FPS).")
         cap.release()
         return None, 0
-    # --- END OF FIX (V2) ---
+    # --- END OF PRIMARY FIX ---
 
     raw_signal = []
     timestamps = []
@@ -84,18 +85,13 @@ def extract_signal_from_video(video_path):
         if not ret:
             break
         
-        # Convert frame to grayscale (more efficient for face detection)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-        
         current_time_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
         
         if len(faces) > 0:
-            # Use the first detected face
             x, y, w, h = faces[0]
             
-            # Define Region of Interest (ROI) - The forehead
             forehead_y_start = y + int(h * 0.1)
             forehead_y_end = y + int(h * 0.25)
             forehead_x_start = x + int(w * 0.25)
@@ -104,7 +100,6 @@ def extract_signal_from_video(video_path):
             roi = frame[forehead_y_start:forehead_y_end, forehead_x_start:forehead_x_end]
             
             if roi.size > 0:
-                # Extract green channel (index 1 in BGR) and average it
                 green_channel_mean = np.mean(roi[:, :, 1])
                 raw_signal.append(green_channel_mean)
                 timestamps.append(current_time_sec)
@@ -115,7 +110,6 @@ def extract_signal_from_video(video_path):
         st.warning("No faces were detected in the video.")
         return None, 0
 
-    # Create a Pandas Series with a time index
     signal_series = pd.Series(raw_signal, index=pd.to_timedelta(timestamps, unit='s'))
     return signal_series, fps
 
@@ -124,21 +118,38 @@ def process_signal(signal_series, fs):
     """
     Cleans, detrends, and bandpass filters the raw signal.
     """
-    # 1. Handle missing values (if any frames had no face)
-    # Linear interpolation and fill ends
+    # --- START OF NEW SAFEGUARDS ---
+    
+    # 1. Paranoid check for FPS (catches error if first check failed)
+    MIN_FS_FOR_BUTTER = PPG_MAX_HZ * 2
+    if fs <= MIN_FS_FOR_BUTTER:
+        st.error(f"Signal processing error: FPS ({fs}) is too low for filter design.")
+        return None # Return None to stop processing
+
+    # 2. Check for signal length (for filtfilt)
+    # filtfilt requires signal length > 3 * filter_order
+    MIN_SIGNAL_LEN = 3 * FILTER_ORDER + 1
+    if len(signal_series) < MIN_SIGNAL_LEN:
+        st.warning(f"Video is too short ({len(signal_series)} samples). "
+                   f"Need at least {MIN_SIGNAL_LEN} samples for processing. "
+                   "Please use a longer video.")
+        return None # Return None to stop processing
+        
+    # --- END OF NEW SAFEGUARDS ---
+
+    # 1. Handle missing values
     signal = signal_series.interpolate(method='linear').fillna(method='bfill').fillna(method='ffill')
     
-    # 2. Detrending - Remove slow-moving changes
-    # Simple mean subtraction
+    # 2. Detrending
     signal_detrended = signal - np.mean(signal)
     
     # 3. Design Butterworth Bandpass filter
     nyq = 0.5 * fs
     low = PPG_MIN_HZ / nyq
     high = PPG_MAX_HZ / nyq
-    b, a = butter(order=4, Wn=[low, high], btype='band')
+    b, a = butter(order=FILTER_ORDER, Wn=[low, high], btype='band')
     
-    # 4. Apply filter (filtfilt for zero phase shift)
+    # 4. Apply filter
     filtered_signal = filtfilt(b, a, signal_detrended)
     
     return pd.Series(filtered_signal, index=signal_series.index)
@@ -149,16 +160,13 @@ def analyze_frequency_domain(signal_series, fs):
     Performs FFT analysis and calculates Heart Rate (HR).
     """
     N = len(signal_series)
-    if N == 0:
+    if N < 2: # Need at least 2 samples for FFT
         return 0, np.array([]), np.array([])
 
-    # Calculate FFT
     yf = fft(signal_series.values)
-    yf_power = np.abs(yf[:N // 2])**2  # Power Spectral Density
-    
+    yf_power = np.abs(yf[:N // 2])**2
     xf = fftfreq(N, 1 / fs)[:N // 2]
     
-    # Filter frequencies to the relevant physiological range
     valid_indices = (xf >= PPG_MIN_HZ) & (xf <= PPG_MAX_HZ)
     xf_valid = xf[valid_indices]
     yf_valid = yf_power[valid_indices]
@@ -166,10 +174,8 @@ def analyze_frequency_domain(signal_series, fs):
     if len(yf_valid) == 0:
         return 0, xf, yf_power
 
-    # Find the dominant frequency (peak) in the range
     peak_index = np.argmax(yf_valid)
     hr_frequency = xf_valid[peak_index]
-    
     hr_bpm = hr_frequency * 60
     
     return hr_bpm, xf, yf_power
@@ -180,22 +186,16 @@ def analyze_time_domain(signal_series, fs):
     Performs time-domain analysis (peak detection) and calculates HRV (RMSSD).
     """
     signal = signal_series.values
-    
-    # Find peaks (heartbeats)
-    # 'prominence' and 'distance' may need tuning
-    distance_min = int(fs * (60.0 / 180.0)) # Min distance between beats (based on 180 BPM)
+    distance_min = int(fs * (60.0 / 180.0)) # Min distance for 180 BPM
     
     peaks, _ = find_peaks(signal, prominence=np.std(signal)*0.2, distance=distance_min)
     
     if len(peaks) < 3:
-        return 0, peaks  # Not enough beats to calculate HRV
+        return 0, peaks
 
-    # Calculate IBI (Inter-Beat Intervals) in seconds
     ibi_sec = np.diff(peaks) / fs
-    
-    # Calculate RMSSD (Root Mean Square of Successive Differences)
     diff_ibi_sec = np.diff(ibi_sec)
-    rmssd_ms = np.sqrt(np.mean(diff_ibi_sec**2)) * 1000  # Convert to milliseconds
+    rmssd_ms = np.sqrt(np.mean(diff_ibi_sec**2)) * 1000
     
     return rmssd_ms, peaks
 
@@ -208,7 +208,6 @@ st.markdown("**Important:** For best results, film your face while holding **per
 uploaded_file = st.file_uploader("Upload a video file (Recommended: 15-30 seconds, face well-lit)", type=["mp4", "mov", "avi"])
 
 if uploaded_file is not None:
-    # Save uploaded file to a temporary file so OpenCV can read it
     with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tfile:
         tfile.write(uploaded_file.getvalue())
         video_path = tfile.name
@@ -222,20 +221,22 @@ if uploaded_file is not None:
             
             with st.spinner("Processing and filtering signal..."):
                 filtered_signal_series = process_signal(raw_signal_series, fps)
+            
+            # --- NEW CHECK FOR PROCESSING FAILURE ---
+            if filtered_signal_series is None:
+                # Error messages are already shown by process_signal
+                st.stop() # Stop execution
+            
             st.success("Step 2: Signal filtering and processing complete!")
 
             with st.spinner("Performing frequency and time domain analysis..."):
-                # Frequency analysis
                 hr_bpm, xf, yf_power = analyze_frequency_domain(filtered_signal_series, fs)
-                
-                # Time analysis
                 rmssd_ms, peaks = analyze_time_domain(filtered_signal_series, fs)
             st.success("Step 3: Analysis complete!")
 
             
             # --- Display Results ---
             st.header("Results & Metrics")
-            
             col1, col2 = st.columns(2)
             col1.metric("Heart Rate (HR) - FFT Based", f"{hr_bpm:.1f} BPM")
             col2.metric("Heart Rate Variability (RMSSD)", f"{rmssd_ms:.2f} ms")
@@ -251,7 +252,6 @@ if uploaded_file is not None:
             with tab2:
                 st.subheader("Filtered PPG Signal (Bandpass) with Peak Detection")
                 fig_filtered = plot_signal(filtered_signal_series, "Filtered Signal", yaxis_title="Normalized Amplitude")
-                # Add peaks as markers on the plot
                 fig_filtered.add_trace(go.Scatter(
                     x=filtered_signal_series.index[peaks],
                     y=filtered_signal_series.values[peaks],
@@ -264,13 +264,11 @@ if uploaded_file is not None:
             with tab3:
                 st.subheader("Power Spectrum (FFT) of Filtered Signal")
                 fig_fft = plot_fft(xf, yf_power, "Power Spectral Density (PSD)")
-                # Add a vertical line/rectangle indicating the found HR
                 fig_fft.add_vrect(x0=hr_bpm/60 - 0.1, x1=hr_bpm/60 + 0.1, 
                                   fillcolor="green", opacity=0.25, line_width=0,
                                   annotation_text=f"HR: {hr_bpm:.1f} BPM", annotation_position="top left")
                 st.plotly_chart(fig_fft, use_container_width=True)
 
     finally:
-        # Clean up the temporary file
         if 'video_path' in locals() and os.path.exists(video_path):
             os.remove(video_path)
