@@ -218,8 +218,11 @@ if uploaded_file is not None:
             st.success("Step 2: Signal filtering and processing complete!")
 
             with st.spinner("Performing frequency and time domain analysis..."):
-                hr_bpm, xf, yf_power = analyze_frequency_domain(filtered_signal_series, fs)
-                rmssd_ms, peaks = analyze_time_domain(filtered_signal_series, fs)
+                # --- START OF FIX ---
+                # The variable containing the frame rate is 'fps', not 'fs'
+                hr_bpm, xf, yf_power = analyze_frequency_domain(filtered_signal_series, fps)
+                rmssd_ms, peaks = analyze_time_domain(filtered_signal_series, fps)
+                # --- END OF FIX ---
             st.success("Step 3: Analysis complete!")
 
             
