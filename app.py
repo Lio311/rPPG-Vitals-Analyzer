@@ -194,7 +194,11 @@ def analyze_time_domain(signal_series, fs):
 
 # --- Streamlit UI ---
 
-st.set_page_config(layout="wide", page_title="rPPG Vitals Analyzer")
+st.set_page_config(
+    layout="wide",
+    page_title="rPPG Vitals Analyzer",
+    page_icon="💓"
+)
 st.title("rPPG - Video-Based Vitals Analyzer")
 st.markdown("**Important:** For best results, film your face while holding **perfectly still**. Do not move at all.")
 
