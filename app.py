@@ -125,8 +125,8 @@ def process_signal(signal_series, fs):
                    "Please use a longer video.")
         return None # Return None to stop processing
 
-    # 1. Handle missing values
-    signal = signal_series.interpolate(method='linear').fillna(method='bfill').fillna(method='ffill')
+    # 1. Handle missing values (FIXED: Updated to remove FutureWarning)
+    signal = signal_series.interpolate(method='linear').bfill().ffill()
     
     # 2. Detrending
     signal_detrended = signal - np.mean(signal)
@@ -136,7 +136,11 @@ def process_signal(signal_series, fs):
     nyq = 0.5 * fs
     low = PPG_MIN_HZ / nyq
     high = PPG_MAX_HZ / nyq
-    b, a = butter(order=FILTER_ORDER, Wn=[low, high], btype='band')
+    
+    # --- THIS IS THE MAIN FIX ---
+    # The 'order' argument is positional (N), not a keyword.
+    b, a = butter(FILTER_ORDER, Wn=[low, high], btype='band')
+    # --- END OF FIX ---
     
     # 4. Apply filter
     filtered_signal = filtfilt(b, a, signal_detrended)
