@@ -59,6 +59,20 @@ def extract_signal_from_video(video_path):
         return None, 0
 
     fps = cap.get(cv2.CAP_PROP_FPS)
+
+    # --- START OF FIX ---
+    # Validate the FPS. It must be high enough to satisfy Nyquist theorem for our filter.
+    # Our max freq is 3.0 Hz (PPG_MAX_HZ), so FPS must be > 6.0.
+    MIN_FPS_REQUIRED = PPG_MAX_HZ * 2 + 1  # Add 1 for safety margin, e.g., 7.0 Hz
+    
+    if fps < MIN_FPS_REQUIRED:
+        st.error(f"Video FPS is too low ({fps:.2f} FPS). "
+                 f"A minimum of {MIN_FPS_REQUIRED:.1f} FPS is required for this analysis. "
+                 "Please use a different video file (e.g., 30 FPS).")
+        cap.release()
+        return None, 0
+    # --- END OF FIX ---
+
     raw_signal = []
     timestamps = []
 
@@ -210,7 +224,7 @@ if uploaded_file is not None:
 
             with st.spinner("Performing frequency and time domain analysis..."):
                 # Frequency analysis
-                hr_bpm, xf, yf_power = analyze_frequency_domain(filtered_signal_series, fps)
+                hr_bpm, xf, yf_power = analyze_frequency_domain(filtered_signal_series, fs)
                 
                 # Time analysis
                 rmssd_ms, peaks = analyze_time_domain(filtered_signal_series, fps)
